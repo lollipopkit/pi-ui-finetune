@@ -1,28 +1,33 @@
-import { mkdirSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import type {
-	ExtensionAPI,
-	ToolResultEvent,
+import {
+	createBashToolDefinition,
+	createEditToolDefinition,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+	type ExtensionAPI,
 } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 
 // ─── Constants ───────────────────────────────────────────────────
 
 const LOG_PREFIX = "[pi-ui-finetune]";
 
-const DEFAULT_SUPPRESSED_TOOLS = ["read", "write"];
-const DEFAULT_PREVIEW_LINES = 3;
-const DEFAULT_PREVIEW_LINE_MAX_CHARS = 120;
-const DEFAULT_MIN_LINES = 4;
-const DEFAULT_MIN_CHARS = 500;
+const DEFAULT_FINETUNED_TOOLS = [
+	"read",
+	"bash",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ls",
+];
+const DEFAULT_COLLAPSED_VISIBLE_LINES = 5;
 
-const ENV_SUPPRESSED_TOOLS = "PIUF_SUPPRESSED_TOOLS";
-const ENV_PREVIEW_LINES = "PIUF_PREVIEW_LINES";
-const ENV_PREVIEW_LINE_MAX_CHARS = "PIUF_PREVIEW_LINE_MAX_CHARS";
-const ENV_MIN_LINES = "PIUF_MIN_LINES";
-const ENV_MIN_CHARS = "PIUF_MIN_CHARS";
-const ENV_TEMP_DIR = "PIUF_TEMP_DIR";
+const ENV_FINETUNED_TOOLS = "PIUF_SUPPRESSED_TOOLS";
+const ENV_COLLAPSED_VISIBLE_LINES = "PIUF_COLLAPSED_VISIBLE_LINES";
 const ENV_DEBUG = "PIUF_DEBUG";
 const ENV_DOT_ENV = ".env";
 
@@ -79,7 +84,7 @@ function readNumberEnv(name: string, defaultValue: number): number {
 	const rawValue = process.env[name];
 	if (!rawValue) return defaultValue;
 
-	const parsed = Number.parseFloat(rawValue);
+	const parsed = Number.parseInt(rawValue, 10);
 	if (!Number.isFinite(parsed) || parsed < 0) {
 		console.warn(
 			`${LOG_PREFIX} Invalid ${name}=${rawValue}; using ${defaultValue}.`,
@@ -90,113 +95,99 @@ function readNumberEnv(name: string, defaultValue: number): number {
 	return parsed;
 }
 
-function readSuppressedTools(): Set<string> {
-	const rawValue = process.env[ENV_SUPPRESSED_TOOLS];
-	if (!rawValue) return new Set(DEFAULT_SUPPRESSED_TOOLS);
+function readFinetunedTools(): Set<string> {
+	const rawValue = process.env[ENV_FINETUNED_TOOLS];
+	if (!rawValue) return new Set(DEFAULT_FINETUNED_TOOLS);
 
 	const tools = rawValue
 		.split(",")
 		.map((t) => t.trim().toLowerCase())
 		.filter(Boolean);
 
-	return tools.length > 0 ? new Set(tools) : new Set(DEFAULT_SUPPRESSED_TOOLS);
+	return tools.length > 0 ? new Set(tools) : new Set(DEFAULT_FINETUNED_TOOLS);
 }
 
-function readTempDir(): string {
-	return (
-		process.env[ENV_TEMP_DIR] ??
-		join(
-			process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"),
-			"pi-ui-finetune",
-		)
+// ─── Renderer helpers ────────────────────────────────────────────
+
+interface TextResultLike {
+	content: Array<{
+		type: string;
+		text?: string;
+	}>;
+	isError?: boolean;
+}
+
+interface TextTheme {
+	fg(name: string, text: string): string;
+}
+
+function textOutput(result: TextResultLike): string {
+	return result.content
+		.filter((part) => part.type === "text")
+		.map((part) => part.text ?? "")
+		.filter(Boolean)
+		.join("\n")
+		.trimEnd();
+}
+
+function countOutputLines(output: string): number {
+	if (!output) return 0;
+	return output.split("\n").length;
+}
+
+function collapsedHint(
+	result: TextResultLike,
+	theme: TextTheme,
+	visibleLines: number,
+): Text {
+	if (result.isError) {
+		const output = textOutput(result);
+		return new Text(output ? `\n${theme.fg("error", output)}` : "", 0, 0);
+	}
+
+	const totalLines = countOutputLines(textOutput(result));
+	if (totalLines === 0) return new Text("", 0, 0);
+
+	const hiddenLines = Math.max(0, totalLines - visibleLines);
+	if (hiddenLines === 0) return new Text("", 0, 0);
+
+	const lineLabel = hiddenLines === 1 ? "line" : "lines";
+	return new Text(
+		`\n${theme.fg(
+			"muted",
+			`   ... (${hiddenLines} earlier ${lineLabel}, ctrl+o to expand)`,
+		)}`,
+		0,
+		0,
 	);
 }
 
-// ─── Content summarizer ──────────────────────────────────────────
+function expandedOutput(result: TextResultLike, theme: TextTheme): Text {
+	const output = textOutput(result);
+	if (!output) return new Text("", 0, 0);
 
-interface ContentPart {
-	type: string;
-	text?: string;
+	const color = result.isError ? "error" : "toolOutput";
+	return new Text(
+		`\n${output
+			.split("\n")
+			.map((line) => theme.fg(color, line))
+			.join("\n")}`,
+		0,
+		0,
+	);
 }
 
-interface SummarizeConfig {
-	previewLines: number;
-	previewLineMaxChars: number;
-	minLines: number;
-	minChars: number;
-}
+function renderResult(
+	result: TextResultLike,
+	options: { expanded: boolean },
+	theme: TextTheme,
+	visibleLines: number,
+): Text {
+	if (!options.expanded) {
+		return collapsedHint(result, theme, visibleLines);
+	}
 
-function summarizeContent(
-	content: ContentPart[],
-	toolName: string,
-	config: SummarizeConfig,
-	tempDir: string,
-	counter: { value: number },
-	debug: boolean,
-): ContentPart[] {
-	return content.map((part) => {
-		if (part.type !== "text" || !part.text) return part;
-
-		const text = part.text;
-		const lines = text.split("\n");
-		const totalLines = lines.length;
-		const totalChars = text.length;
-
-		// Small outputs: pass through unchanged
-		if (
-			totalLines <= config.previewLines + config.minLines &&
-			totalChars < config.minChars
-		) {
-			if (debug) {
-				console.warn(
-					`${LOG_PREFIX} ${toolName}: passing through small output (${totalLines} lines, ${totalChars} chars)`,
-				);
-			}
-			return part;
-		}
-
-		// Build preview
-		const previewLines = lines
-			.slice(0, config.previewLines)
-			.map((l) => l.slice(0, config.previewLineMaxChars));
-		const preview = previewLines.join("\n");
-
-		// Save full content to temp file
-		const tempFile = join(
-			tempDir,
-			`${toolName}-${Date.now()}-${counter.value++}.txt`,
-		);
-		try {
-			mkdirSync(tempDir, { recursive: true });
-			writeFileSync(tempFile, text, "utf-8");
-
-			const hint =
-				totalLines > 20
-					? `\nFull content (${totalLines} lines, ${totalChars} chars) saved to: ${tempFile}\nUse read with offset/limit to inspect specific sections.`
-					: `\nFull content (${totalLines} lines, ${totalChars} chars) saved to: ${tempFile}`;
-
-			if (debug) {
-				console.warn(
-					`${LOG_PREFIX} ${toolName}: suppressed ${totalLines} lines → preview + temp file ${tempFile}`,
-				);
-			}
-
-			return { type: "text" as const, text: `${preview}\n...${hint}` };
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			console.warn(
-				`${LOG_PREFIX} Failed to write temp file ${tempFile}: ${message}`,
-			);
-
-			// Fallback without temp file
-			const hint =
-				totalLines > 20
-					? `\n(${totalLines} lines, ${totalChars} chars total — use offset/limit to read specific sections)`
-					: `\n(${totalLines} lines, ${totalChars} chars total)`;
-
-			return { type: "text" as const, text: `${preview}\n...${hint}` };
-		}
-	});
+	return expandedOutput(result, theme);
 }
 
 // ─── Extension ────────────────────────────────────────────────────
@@ -204,54 +195,151 @@ function summarizeContent(
 export default async function (pi: ExtensionAPI) {
 	await loadDotEnv();
 
-	const suppressedTools = readSuppressedTools();
-	const previewLines = readNumberEnv(ENV_PREVIEW_LINES, DEFAULT_PREVIEW_LINES);
-	const previewLineMaxChars = readNumberEnv(
-		ENV_PREVIEW_LINE_MAX_CHARS,
-		DEFAULT_PREVIEW_LINE_MAX_CHARS,
+	const finetunedTools = readFinetunedTools();
+	const collapsedVisibleLines = readNumberEnv(
+		ENV_COLLAPSED_VISIBLE_LINES,
+		DEFAULT_COLLAPSED_VISIBLE_LINES,
 	);
-	const minLines = readNumberEnv(ENV_MIN_LINES, DEFAULT_MIN_LINES);
-	const minChars = readNumberEnv(ENV_MIN_CHARS, DEFAULT_MIN_CHARS);
-	const tempDir = readTempDir();
 	const debug = readBooleanEnv(ENV_DEBUG);
 
-	// Ensure temp dir exists
-	mkdirSync(tempDir, { recursive: true });
-
-	const counter = { value: 0 };
-
-	const config: SummarizeConfig = {
-		previewLines,
-		previewLineMaxChars,
-		minLines,
-		minChars,
-	};
-
 	if (debug) {
-		const toolList = [...suppressedTools].join(", ");
 		console.warn(
-			`${LOG_PREFIX} Config: suppressedTools=[${toolList}], previewLines=${previewLines}, minLines=${minLines}, minChars=${minChars}, tempDir=${tempDir}`,
+			`${LOG_PREFIX} Config: tools=[${[...finetunedTools].join(
+				", ",
+			)}], collapsedVisibleLines=${collapsedVisibleLines}`,
 		);
 	}
 
-	pi.on(
-		"tool_result",
-		async (
-			event: ToolResultEvent,
-			_ctx,
-		): Promise<undefined | { content?: ToolResultEvent["content"] }> => {
-			if (!suppressedTools.has(event.toolName)) return undefined;
+	if (finetunedTools.has("bash")) {
+		const baseTool = createBashToolDefinition(process.cwd());
+		pi.registerTool({
+			...baseTool,
+			execute(toolCallId, params, signal, onUpdate, ctx) {
+				return createBashToolDefinition(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
+			},
+			renderResult(result, options, theme) {
+				return renderResult(result, options, theme, collapsedVisibleLines);
+			},
+		});
+	}
 
-			return {
-				content: summarizeContent(
-					event.content,
-					event.toolName,
-					config,
-					tempDir,
-					counter,
-					debug,
-				) as ToolResultEvent["content"],
-			};
-		},
-	);
+	if (finetunedTools.has("read")) {
+		const baseTool = createReadToolDefinition(process.cwd());
+		pi.registerTool({
+			...baseTool,
+			execute(toolCallId, params, signal, onUpdate, ctx) {
+				return createReadToolDefinition(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
+			},
+			renderResult(result, options, theme) {
+				return renderResult(result, options, theme, collapsedVisibleLines);
+			},
+		});
+	}
+
+	if (finetunedTools.has("edit")) {
+		const baseTool = createEditToolDefinition(process.cwd());
+		pi.registerTool({
+			...baseTool,
+			execute(toolCallId, params, signal, onUpdate, ctx) {
+				return createEditToolDefinition(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
+			},
+			renderResult(result, options, theme) {
+				return renderResult(result, options, theme, collapsedVisibleLines);
+			},
+		});
+	}
+
+	if (finetunedTools.has("write")) {
+		const baseTool = createWriteToolDefinition(process.cwd());
+		pi.registerTool({
+			...baseTool,
+			execute(toolCallId, params, signal, onUpdate, ctx) {
+				return createWriteToolDefinition(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
+			},
+			renderResult(result, options, theme) {
+				return renderResult(result, options, theme, collapsedVisibleLines);
+			},
+		});
+	}
+
+	if (finetunedTools.has("grep")) {
+		const baseTool = createGrepToolDefinition(process.cwd());
+		pi.registerTool({
+			...baseTool,
+			execute(toolCallId, params, signal, onUpdate, ctx) {
+				return createGrepToolDefinition(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
+			},
+			renderResult(result, options, theme) {
+				return renderResult(result, options, theme, collapsedVisibleLines);
+			},
+		});
+	}
+
+	if (finetunedTools.has("find")) {
+		const baseTool = createFindToolDefinition(process.cwd());
+		pi.registerTool({
+			...baseTool,
+			execute(toolCallId, params, signal, onUpdate, ctx) {
+				return createFindToolDefinition(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
+			},
+			renderResult(result, options, theme) {
+				return renderResult(result, options, theme, collapsedVisibleLines);
+			},
+		});
+	}
+
+	if (finetunedTools.has("ls")) {
+		const baseTool = createLsToolDefinition(process.cwd());
+		pi.registerTool({
+			...baseTool,
+			execute(toolCallId, params, signal, onUpdate, ctx) {
+				return createLsToolDefinition(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+					ctx,
+				);
+			},
+			renderResult(result, options, theme) {
+				return renderResult(result, options, theme, collapsedVisibleLines);
+			},
+		});
+	}
 }

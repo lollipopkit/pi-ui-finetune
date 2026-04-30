@@ -1,27 +1,25 @@
-# Pi UI Finetune — Tool Output Suppressor
+# Pi UI Finetune — Tool Output Display Trimmer
 
 English | [中文](./README.zh.md)
 
-A [Pi](https://github.com/badlogic/pi-mono) extension that suppresses verbose
-tool output from `read` and `write` operations to reduce LLM context pollution.
+A [Pi](https://github.com/badlogic/pi-mono) extension that reduces the collapsed
+TUI display for verbose built-in tool results.
 
-## Problem
+## Behavior
 
-When Pi reads or writes large files, the full content is sent back to the LLM,
-consuming valuable context window tokens. For a 1000-line file, this can waste
-thousands of tokens on content the model doesn't need to see in full.
+The extension re-registers Pi's built-in `read`, `bash`, `edit`, `write`,
+`grep`, `find`, and `ls` tools with custom result renderers:
 
-## Solution
+- Collapsed view shows the normal tool call line plus one compact hint.
+- Expanded view (`ctrl+o`) still shows the tool result.
+- Tool execution and returned content are not replaced with temp-file summaries.
 
-This extension hooks into the `tool_result` event and replaces large `read` /
-`write` tool outputs with a compact summary:
+For a long bash result, collapsed display becomes:
 
-- **Small outputs** pass through unchanged (≤ 7 lines AND < 500 chars)
-- **Larger outputs** are replaced with:
-  - A preview of the first 3 lines (truncated to 120 chars each)
-  - Line count and character count
-  - A temp file path containing the full content (LLM can use `read` with
-    `offset`/`limit` to inspect specific sections)
+```text
+$ find /Users/lk/proj/academy-agent-web -type f -name "*.go" | head -30
+   ... (25 earlier lines, ctrl+o to expand)
+```
 
 ## Installation
 
@@ -35,26 +33,16 @@ Or copy `index.ts` to `~/.pi/agent/extensions/` for auto-discovery.
 
 ## Configuration
 
-All settings are optional and use sensible defaults.
+All settings are optional.
 
 ```bash
-# Which tools to suppress (comma-separated, default: read,write)
-PIUF_SUPPRESSED_TOOLS=read,write
+# Tools whose collapsed display should be trimmed.
+# Default: all built-in tools: read,bash,edit,write,grep,find,ls
+PIUF_SUPPRESSED_TOOLS=read,bash,edit,write,grep,find,ls
 
-# Max preview lines shown before truncation (default: 3)
-PIUF_PREVIEW_LINES=3
-
-# Max chars per preview line (default: 120)
-PIUF_PREVIEW_LINE_MAX_CHARS=120
-
-# Skip suppression when output is under this many lines (default: 4)
-PIUF_MIN_LINES=4
-
-# Skip suppression when output is under this many chars (default: 500)
-PIUF_MIN_CHARS=500
-
-# Directory for temp files storing full content (default: system temp dir)
-PIUF_TEMP_DIR=/tmp/pi-hide
+# Number of output lines considered visible in Pi's normal collapsed preview.
+# The hint reports total output lines minus this number. Default: 5
+PIUF_COLLAPSED_VISIBLE_LINES=5
 
 # Enable debug logging (default: false)
 PIUF_DEBUG=false
@@ -62,28 +50,6 @@ PIUF_DEBUG=false
 
 The extension also reads these variables from a local `.env` file. Real
 environment variables take precedence over `.env` values.
-
-## Example
-
-**Before** (full 100-line file piped into LLM context):
-
-```
-1: import { createHash } from "node:crypto";
-2: import { mkdir, readFile, writeFile } from "node:fs/promises";
-3: import { homedir } from "node:os";
-...100 more lines...
-```
-
-**After** (compact summary):
-
-```
-1: import { createHash } from "node:crypto";
-2: import { mkdir, readFile, writeFile } from "node:fs/promises";
-3: import { homedir } from "node:os";
-...
-Full content (100 lines, 4521 chars) saved to: /tmp/pi-hide-Hk2m/read-1714539600000-0.txt
-Use read with offset/limit to inspect specific sections.
-```
 
 ## More Extensions
 
