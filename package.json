@@ -1,0 +1,32 @@
+{
+	"name": "pi-ui-finetune",
+	"version": "0.1.0",
+	"description": "Pi extension that suppresses verbose tool output (read/write) to reduce LLM context pollution.",
+	"type": "module",
+	"files": [
+		"index.ts",
+		"README.md",
+		"README.zh.md",
+		".env.example"
+	],
+	"scripts": {
+		"clean": "echo 'nothing to clean'",
+		"build": "echo 'nothing to build'",
+		"check": "biome check --error-on-warnings . && tsgo --noEmit -p tsconfig.json"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-ai": "*",
+		"@mariozechner/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.4.12",
+		"@mariozechner/pi-ai": "^0.70.6",
+		"@mariozechner/pi-coding-agent": "^0.70.6",
+		"@typescript/native-preview": "7.0.0-dev.20260423.1"
+	}
+}
