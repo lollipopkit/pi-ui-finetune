@@ -1,4 +1,4 @@
-# Pi UI Finetune — 工具输出显示精简器
+# Pi UI Finetune
 
 [English](./README.md) | 中文
 
@@ -44,4 +44,4 @@ PIUF_DEBUG=false
 ## 更多插件
 
 - [tab-follow-up](https://github.com/lollipopkit/pi-tab-follow-up/blob/main/README.zh.md): 使用 <kbd>Tab</kbd> 而不是 <kbd>Alt</kbd>+<kbd>Enter</kbd> 来触发跟进输入。
-- [pi-models-metadata](https://github.com/lollipopkit/pi-models-metadata): 注册 provider 模型并增强元数据。
+- [pi-models-metadata](https://github.com/lollipopkit/pi-models-metadata): 自动同步远端的模型列表+模型的元数据(上下文大小/多模态等等)

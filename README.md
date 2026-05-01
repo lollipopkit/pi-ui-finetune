@@ -1,4 +1,4 @@
-# Pi UI Finetune — Tool Output Display Trimmer
+# Pi UI Finetune
 
 English | [中文](./README.zh.md)
 
@@ -45,4 +45,4 @@ environment variables take precedence over `.env` values.
 ## More Extensions
 
 - [tab-follow-up](https://github.com/lollipopkit/pi-tab-follow-up): Use <kbd>Tab</kbd> instead of <kbd>Alt</kbd>+<kbd>Enter</kbd> to trigger follow-up input.
-- [pi-models-metadata](https://github.com/lollipopkit/pi-models-metadata): Register provider models with metadata enrichment.
+- [pi-models-metadata](https://github.com/lollipopkit/pi-models-metadata): Automatically sync remote models list and model metadata, including context size and multimodal support.
